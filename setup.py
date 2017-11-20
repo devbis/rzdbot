@@ -4,7 +4,7 @@ from distutils.core import setup
 
 setup(
     name='rzdbot',
-    version='0.1',
+    version='0.2',
     description='Telegram bot for searching tickets on rzd.ru',
     author='Ivan Belokobylskiy',
     author_email='belokobylskij@gmail.com',
