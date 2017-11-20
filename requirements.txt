@@ -1,2 +1,2 @@
-aiotg==0.7.17
-git+https://github.com/devbis/aiorzd.git@e5050116c2eab549c7b9e063b45870d0792dd7ca#egg=rzdbot
+aiotg==0.9.4
+git+https://github.com/devbis/aiorzd.git@a4fd631adb51a1c8bf192c549e6ed0aa8d7e0e56#egg=aiorzd
