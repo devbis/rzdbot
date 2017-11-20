@@ -6,6 +6,7 @@ import re
 import logging
 import datetime
 
+from aiohttp import ClientConnectorError
 from aiotg import Bot, Chat
 from aiorzd import TimeRange, RzdFetcher, UpstreamError
 import asyncio
@@ -36,6 +37,21 @@ QUERY_REGEXP_LIST = [
     r'(?P<from>[^,]+)\s*,\s*(?P<to>[^,]+)\s*,\s*(?P<when>.*)',
     r'(?P<from>[^\s]+)\s+(?P<to>[^\s]+)(?P<when>.*)',
 ]
+
+
+def future_month(date, today):
+    if date < today:
+        if today.month == 12:
+            date = date.replace(month=1, year=date.year + 1)
+        else:
+            date = date.replace(month=today.month + 1)
+    return date
+
+
+def future_year(date, today):
+    if date < today:
+        date = date.replace(year=date.year + 1)
+    return date
 
 
 def multibot(command, default=False):
@@ -137,12 +153,32 @@ class QueryString:
                 int(r.group(7)),
                 int(r.group(8)),
             )
-            if start < today:
-                start = start.replace(year=today.year + 1)
-                end = end.replace(year=today.year + 1)
-                if (end - start).days > 7:
-                    raise TooLongPeriod('Too long period, use at max 7 days')
+            start = future_year(start, today)
+            end = future_year(end, today)
+            if (end - start).days > 7:
+                raise TooLongPeriod('Too long period, use at max 7 days')
             return TimeRange(start, end)
+        r = re.match(r'0?(\d+)(?:\s*[\-–.]\s*0?(\d+))?', s)
+        if r:
+            start = datetime.datetime(
+                today.year,
+                int(r.group(2)),
+                int(r.group(1)),
+                0,
+                0,
+            )
+            start = future_year(start, today)
+            end = start.replace(hour=23, minute=59)
+            if end < start:
+                if start.month == 12:
+                    end = end.replace(month=1, year=end.year + 1)
+                else:
+                    end = end.replace(month=end.month + 1)
+
+            if abs((end - start).days) > 7:
+                raise TooLongPeriod('Too long period, use at max 7 days')
+            return TimeRange(start, end)
+
         r = re.match(r'0?(\d+)(?:\s*[-–]\s*(\d+))?', s)
         if r:
             start = datetime.datetime(
@@ -152,12 +188,7 @@ class QueryString:
                 0,
                 0,
             )
-
-            if start < today:
-                if today.month == 12:
-                    start = start.replace(month=1, year=start.year + 1)
-                else:
-                    start = start.replace(month=today.month + 1)
+            start = future_month(start, today)
 
             end = start.replace(hour=23, minute=59)
             if r.group(2) is not None:
@@ -187,7 +218,7 @@ async def get_trains(fetcher: RzdFetcher, query: QueryString):
                 query.time_range,
             )
             break
-        except UpstreamError:
+        except (UpstreamError, ClientConnectorError):
             await asyncio.sleep(0.5)
             continue
 
