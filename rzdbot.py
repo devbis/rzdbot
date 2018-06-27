@@ -245,62 +245,64 @@ async def notify(chat: Chat, match):
     if notifier.exception:
         return
 
-    fetcher = RzdFetcher()
-    async with NotifyExceptions(chat) as notifier:
-        city_from = (await fetcher.get_city_autocomplete(query.city_from))['n']
-        city_to = (await fetcher.get_city_autocomplete(query.city_to))['n']
-    if notifier.exception:
-        return
+    async with RzdFetcher() as fetcher:
+        async with NotifyExceptions(chat) as notifier:
+            city_from = (
+                await fetcher.get_city_autocomplete(query.city_from)
+            )['n']
+            city_to = (await fetcher.get_city_autocomplete(query.city_to))['n']
+        if notifier.exception:
+            return
 
-    msg = """Буду искать по запросу {} -> {}, с {} по {}{}{}{}""".format(
-        city_from,
-        city_to,
-        query.time_range.start,
-        query.time_range.end,
-        ' не дороже {} рублей'.format(query.max_price)
-        if query.max_price else '',
-        ' только {}'.format(",".join(query.types_filter))
-        if query.types_filter else '',
-        ' не меньше {} мест в одном поезде'.format(query.min_tickets)
-        if query.min_tickets else '',
-    )
-    await chat.send_text(msg)
-    start_time = datetime.datetime.now()
-    last_notify = start_time
+        msg = """Буду искать по запросу {} -> {}, с {} по {}{}{}{}""".format(
+            city_from,
+            city_to,
+            query.time_range.start,
+            query.time_range.end,
+            ' не дороже {} рублей'.format(query.max_price)
+            if query.max_price else '',
+            ' только {}'.format(",".join(query.types_filter))
+            if query.types_filter else '',
+            ' не меньше {} мест в одном поезде'.format(query.min_tickets)
+            if query.min_tickets else '',
+        )
+        await chat.send_text(msg)
+        start_time = datetime.datetime.now()
+        last_notify = start_time
 
-    async with NotifyExceptions(chat):
-        while True:
-            filtered_trains, all_trains = await get_trains(fetcher, query)
-            if filtered_trains:
-                answer = 'Найдено: \n'
-                for train in filtered_trains[0:30]:
-                    answer += \
-                        '<b>{date}</b>\n' \
-                        '<i>{num} {title}</i>\n' \
-                        '{seats}\n\n'.format(
-                            date=train.departure_time,
-                            num=train.number,
-                            title=train.title,
-                            seats="\n".join(
-                                " - %s" % s for s in train.seats.values()
-                            ),
-                        )
-                if len(filtered_trains) > 30:
-                    answer += 'Есть ещё поезда, сократите диапазон дат... '
+        async with NotifyExceptions(chat):
+            while True:
+                filtered_trains, all_trains = await get_trains(fetcher, query)
+                if filtered_trains:
+                    answer = 'Найдено: \n'
+                    for train in filtered_trains[0:30]:
+                        answer += \
+                            '<b>{date}</b>\n' \
+                            '<i>{num} {title}</i>\n' \
+                            '{seats}\n\n'.format(
+                                date=train.departure_time,
+                                num=train.number,
+                                title=train.title,
+                                seats="\n".join(
+                                    " - %s" % s for s in train.seats.values()
+                                ),
+                            )
+                    if len(filtered_trains) > 30:
+                        answer += 'Есть ещё поезда, сократите диапазон дат... '
 
-                await chat.send_text(answer, parse_mode='HTML')
-                break
-            else:
-                logger.info('sleep for 30 sec')
-                await asyncio.sleep(30)
+                    await chat.send_text(answer, parse_mode='HTML')
+                    break
+                else:
+                    logger.info('sleep for 30 sec')
+                    await asyncio.sleep(30)
 
-            now = datetime.datetime.now()
-            if (now - start_time).seconds > 86400:
-                await chat.send_text('Ничего не нашёл. Прекращаю работу.')
-                break
-            elif (now - last_notify).seconds > 3600:
-                last_notify = now
-                await chat.send_text('Всё ещё нет билетов. Ищу...')
+                now = datetime.datetime.now()
+                if (now - start_time).seconds > 86400:
+                    await chat.send_text('Ничего не нашёл. Прекращаю работу.')
+                    break
+                elif (now - last_notify).seconds > 3600:
+                    last_notify = now
+                    await chat.send_text('Всё ещё нет билетов. Ищу...')
 
 
 @multibot('search', default=True)
@@ -314,7 +316,8 @@ async def search(chat: Chat, match):
     if notifier.exception:
         return
 
-    filtered_trains, all_trains = await get_trains(RzdFetcher(), query)
+    async with RzdFetcher() as fetcher:
+        filtered_trains, all_trains = await get_trains(fetcher, query)
 
     if not filtered_trains:
         if all_trains:
