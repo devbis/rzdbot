@@ -1,2 +1,6 @@
 0.1
 - initial version
+0.2
+- fix parsing dates
+0.3
+- upgrade aiorzd to fix unclosed session
