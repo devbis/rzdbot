@@ -317,7 +317,10 @@ async def search(chat: Chat, match):
         return
 
     async with RzdFetcher() as fetcher:
-        filtered_trains, all_trains = await get_trains(fetcher, query)
+        async with NotifyExceptions(chat) as notifier:
+            filtered_trains, all_trains = await get_trains(fetcher, query)
+        if notifier.exception:
+            return
 
     if not filtered_trains:
         if all_trains:
