@@ -368,4 +368,10 @@ def usage(chat: Chat, match):
 if __name__ == '__main__':
     logger.setLevel(logging.INFO)
     logger.warning('Start RZD telegram bot...')
-    bot.run()
+    while True:
+        try:
+            bot.run()
+        except KeyboardInterrupt:
+            raise
+        except:
+            pass
