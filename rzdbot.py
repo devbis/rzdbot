@@ -302,7 +302,18 @@ async def notify(chat: Chat, match):
                     break
                 elif (now - last_notify).seconds > 3600:
                     last_notify = now
-                    await chat.send_text('Всё ещё нет билетов. Ищу...')
+                    await chat.send_text(
+                        'Всё ещё нет билетов {city_from} – {city_to} '
+                        '{time_start} - {time_end}. '
+                        'Ищу уже {working} секунд.\n'
+                        'Продолжаю поиск...'.format(
+                            city_from=city_from,
+                            city_to=city_to,
+                            time_start=query.time_range.start,
+                            time_end=query.time_range.end,
+                            working=(now - start_time).seconds,
+                        )
+                    )
 
 
 @multibot('search', default=True)
