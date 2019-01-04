@@ -222,7 +222,12 @@ async def get_trains(fetcher: RzdFetcher, query: QueryString):
             await asyncio.sleep(0.5)
             continue
 
-    filtered_trains = RzdFetcher.filter_trains(trains, query.types_filter)
+    # exact filtering by time range
+    filtered_trains = [
+        t
+        for t in RzdFetcher.filter_trains(trains, query.types_filter)
+        if query.time_range.start <= t.departure_time <= query.time_range.end
+    ]
 
     if query.max_price:
         filtered_trains = filter(lambda t: any(
@@ -230,7 +235,12 @@ async def get_trains(fetcher: RzdFetcher, query: QueryString):
             if s.price < query.max_price and (
                 not query.min_tickets or s.quantity >= query.min_tickets
             )
-        ), trains)
+        ), filtered_trains)
+    elif query.min_tickets:
+        filtered_trains = filter(lambda t: any(
+            s for s in t.seats.values()
+            if s.quantity >= query.min_tickets
+        ), filtered_trains)
 
     return list(filtered_trains), trains
 
