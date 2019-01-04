@@ -19,7 +19,6 @@ with open(os.environ['BOT_CONFIG']) as cfg:
 
 bot = Bot(config['API_TOKEN'], name=config['BOT_NAME'])
 
-
 shortcuts = {
     'москва': [
         'мск',
@@ -37,6 +36,21 @@ QUERY_REGEXP_LIST = [
     r'(?P<from>[^,]+)\s*,\s*(?P<to>[^,]+)\s*,\s*(?P<when>.*)',
     r'(?P<from>[^\s]+)\s+(?P<to>[^\s]+)(?P<when>.*)',
 ]
+
+queue = asyncio.Queue()
+
+
+class QueueItem:
+    def __init__(self, chat, query, start_time=None, deadline=None,
+                 city_from=None, city_to=None):
+        self.chat = chat
+        self.start_time = start_time or datetime.datetime.now()
+        self.deadline = deadline
+        self.query = query
+        self.last_call = None
+        self.last_notify = None
+        self.city_from = city_from
+        self.city_to = city_to
 
 
 def future_month(date, today):
@@ -192,9 +206,7 @@ class QueryString:
 
             end = start.replace(hour=23, minute=59)
             if r.group(2) is not None:
-                end = end.replace(
-                    day=int(r.group(2))
-                )
+                end = end.replace(day=int(r.group(2)))
             if end < start:
                 if start.month == 12:
                     end = end.replace(month=1, year=end.year + 1)
@@ -245,6 +257,57 @@ async def get_trains(fetcher: RzdFetcher, query: QueryString):
     return list(filtered_trains), trains
 
 
+async def process_queue():
+    async with RzdFetcher() as fetcher:
+        while True:
+            now = datetime.datetime.now()
+            task: QueueItem = await queue.get()
+            task.last_call = now
+            async with NotifyExceptions(task.chat):
+                filtered_trains, all_trains = await get_trains(fetcher,
+                                                               task.query)
+                if filtered_trains:
+                    answer = 'Найдено: \n'
+                    for train in filtered_trains[0:30]:
+                        answer += \
+                            '<b>{date}</b>\n' \
+                            '<i>{num} {title}</i>\n' \
+                            '{seats}\n\n'.format(
+                                date=train.departure_time,
+                                num=train.number,
+                                title=train.title,
+                                seats="\n".join(
+                                    " - %s" % s for s in train.seats.values()
+                                ),
+                            )
+                    if len(filtered_trains) > 30:
+                        answer += 'Есть ещё поезда, сократите диапазон дат... '
+
+                    await task.chat.send_text(answer, parse_mode='HTML')
+                else:
+                    await queue.put(task)
+                    if task.deadline and now > task.deadline > 86400:
+                        await task.chat.send_text(
+                            'Ничего не нашёл. Прекращаю работу.')
+                        break
+                    elif task.last_notify and \
+                            (now - task.last_notify).seconds > 3600:
+                        task.last_notify = now
+                        await task.chat.send_text(
+                            'Всё ещё нет билетов {city_from} – {city_to} '
+                            '{time_start} - {time_end}. '
+                            'Ищу уже {working} секунд.\n'
+                            'Продолжаю поиск...'.format(
+                                city_from=task.city_from,
+                                city_to=task.city_to,
+                                time_start=task.query.time_range.start,
+                                time_end=task.query.time_range.end,
+                                working=(now - task.start_time).seconds,
+                            ),
+                        )
+            await asyncio.sleep(30)
+
+
 @multibot('notify')
 async def notify(chat: Chat, match):
     user = await chat.get_chat_member(chat.sender["id"])
@@ -278,52 +341,15 @@ async def notify(chat: Chat, match):
         )
         await chat.send_text(msg)
         start_time = datetime.datetime.now()
-        last_notify = start_time
-
-        async with NotifyExceptions(chat):
-            while True:
-                filtered_trains, all_trains = await get_trains(fetcher, query)
-                if filtered_trains:
-                    answer = 'Найдено: \n'
-                    for train in filtered_trains[0:30]:
-                        answer += \
-                            '<b>{date}</b>\n' \
-                            '<i>{num} {title}</i>\n' \
-                            '{seats}\n\n'.format(
-                                date=train.departure_time,
-                                num=train.number,
-                                title=train.title,
-                                seats="\n".join(
-                                    " - %s" % s for s in train.seats.values()
-                                ),
-                            )
-                    if len(filtered_trains) > 30:
-                        answer += 'Есть ещё поезда, сократите диапазон дат... '
-
-                    await chat.send_text(answer, parse_mode='HTML')
-                    break
-                else:
-                    logger.info('sleep for 30 sec')
-                    await asyncio.sleep(30)
-
-                now = datetime.datetime.now()
-                if (now - start_time).seconds > 86400:
-                    await chat.send_text('Ничего не нашёл. Прекращаю работу.')
-                    break
-                elif (now - last_notify).seconds > 3600:
-                    last_notify = now
-                    await chat.send_text(
-                        'Всё ещё нет билетов {city_from} – {city_to} '
-                        '{time_start} - {time_end}. '
-                        'Ищу уже {working} секунд.\n'
-                        'Продолжаю поиск...'.format(
-                            city_from=city_from,
-                            city_to=city_to,
-                            time_start=query.time_range.start,
-                            time_end=query.time_range.end,
-                            working=(now - start_time).seconds,
-                        )
-                    )
+        task = QueueItem(
+            chat,
+            query,
+            start_time=start_time,
+            deadline=start_time + datetime.timedelta(days=1),
+            city_from=city_from,
+            city_to=city_to,
+        )
+        await queue.put(task)
 
 
 @multibot('search', default=True)
@@ -386,13 +412,32 @@ def usage(chat: Chat, match):
     return chat.send_text(text)
 
 
+async def stop_bot():
+    while not queue.empty():
+        task = await queue.get()
+        task.chat.send_text('Bot is quitting. Bye!')
+
 if __name__ == '__main__':
     logger.setLevel(logging.INFO)
     logger.warning('Start RZD telegram bot...')
+
+    loop = asyncio.get_event_loop()
     while True:
+        bot_future = asyncio.ensure_future(bot.loop())
+        task_future = asyncio.ensure_future(process_queue())
         try:
-            bot.run()
+            loop.run_until_complete(bot_future)
+            # bot.run()
         except KeyboardInterrupt:
+            loop.run_until_complete(stop_bot())
+            bot_future.cancel()
+            task_future.cancel()
+            bot.stop()
             raise
-        except:
+        except:  # noqa
             pass
+        finally:
+            loop.run_until_complete(bot.session.close())
+            logger.debug("Closing loop")
+            loop.stop()
+            loop.close()
