@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-
+import collections
 import json
 import os
 import re
 import logging
 import datetime
 
-from aiohttp import ClientConnectorError
-from aiotg import Bot, Chat
+from aiohttp import ClientConnectionError
+from aiotg import Bot, Chat, RETRY_TIMEOUT
 from aiorzd import TimeRange, RzdFetcher, UpstreamError
 import asyncio
 
@@ -38,19 +38,7 @@ QUERY_REGEXP_LIST = [
 ]
 
 queue = asyncio.Queue()
-
-
-class QueueItem:
-    def __init__(self, chat, query, start_time=None, deadline=None,
-                 city_from=None, city_to=None):
-        self.chat = chat
-        self.start_time = start_time or datetime.datetime.now()
-        self.deadline = deadline
-        self.query = query
-        self.last_call = None
-        self.last_notify = None
-        self.city_from = city_from
-        self.city_to = city_to
+tasks_by_chats = collections.defaultdict(set)
 
 
 def future_month(date, today):
@@ -94,9 +82,12 @@ class NotifyExceptions:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if exc_val:
-            self.exception = exc_val
-            await self.chat.send_text("Ошибка: %s" % str(exc_val))
-            logger.error('Exception: %s', repr(exc_val))
+            if issubclass(exc_type, asyncio.CancelledError):
+                await self.chat.send_text("Фоновая задача была отменена")
+            else:
+                self.exception = exc_val
+                await self.chat.send_text("Ошибка: %s" % str(exc_val))
+                logger.error('Exception: %s', repr(exc_val))
 
 
 class QueryString:
@@ -130,6 +121,20 @@ class QueryString:
         self.time_range = self.parse_when(when.strip())
         self.min_tickets = min_tickets
         self.types_filter = None
+
+    def __str__(self):
+        return '{} –> {}, c {} по {}{}{}{}'.format(
+            self.city_from,
+            self.city_to,
+            self.time_range.start,
+            self.time_range.end,
+            ' не дороже {} рублей'.format(self.max_price)
+            if self.max_price else '',
+            ' только {}'.format(",".join(self.types_filter))
+            if self.types_filter else '',
+            ' не меньше {} мест в одном поезде'.format(self.min_tickets)
+            if self.min_tickets else '',
+        )
 
     @staticmethod
     def parse_max_price(max_price):
@@ -221,6 +226,37 @@ class QueryString:
         raise ValueError('Не понял диапазон дат...')
 
 
+class QueueItem:
+    counter = 1
+
+    def __init__(self, chat: Chat, query: QueryString, start_time=None,
+                 deadline=None, city_from=None, city_to=None):
+        self.id = self.counter
+        self.__class__.counter += 1
+        self.chat = chat
+        self.start_time = start_time or datetime.datetime.now()
+        self.deadline = deadline
+        self.query = query
+        self.last_call = None
+        self.last_notify = self.start_time
+        self.city_from = city_from
+        self.city_to = city_to
+
+    def __str__(self):
+        return '{} –> {}, c {} по {}{}{}{}'.format(
+            self.city_from,
+            self.city_to,
+            self.query.time_range.start.strftime("%Y-%m-%d %H:%M"),
+            self.query.time_range.end.strftime("%Y-%m-%d %H:%M"),
+            ' не дороже {} рублей'.format(self.query.max_price)
+            if self.query.max_price else '',
+            ' только {}'.format(",".join(self.query.types_filter))
+            if self.query.types_filter else '',
+            ' не меньше {} мест в одном поезде'.format(self.query.min_tickets)
+            if self.query.min_tickets else '',
+        )
+
+
 async def get_trains(fetcher: RzdFetcher, query: QueryString):
     while True:
         try:
@@ -230,7 +266,7 @@ async def get_trains(fetcher: RzdFetcher, query: QueryString):
                 query.time_range,
             )
             break
-        except (UpstreamError, ClientConnectorError):
+        except (UpstreamError, ClientConnectionError):
             await asyncio.sleep(0.5)
             continue
 
@@ -260,52 +296,73 @@ async def get_trains(fetcher: RzdFetcher, query: QueryString):
 async def process_queue():
     async with RzdFetcher() as fetcher:
         while True:
-            now = datetime.datetime.now()
-            task: QueueItem = await queue.get()
-            task.last_call = now
-            async with NotifyExceptions(task.chat):
-                filtered_trains, all_trains = await get_trains(fetcher,
-                                                               task.query)
-                if filtered_trains:
-                    answer = 'Найдено: \n'
-                    for train in filtered_trains[0:30]:
-                        answer += \
-                            '<b>{date}</b>\n' \
-                            '<i>{num} {title}</i>\n' \
-                            '{seats}\n\n'.format(
-                                date=train.departure_time,
-                                num=train.number,
-                                title=train.title,
-                                seats="\n".join(
-                                    " - %s" % s for s in train.seats.values()
+            try:
+                now = datetime.datetime.now()
+                while True:
+                    task: QueueItem = await queue.get()
+                    if task in tasks_by_chats[task.chat.id]:
+                        break
+
+                task.last_call = now
+                async with NotifyExceptions(task.chat):
+                    logger.debug(f'Fetch data for {task.query}')
+                    filtered_trains, all_trains = await get_trains(fetcher,
+                                                                   task.query)
+                    if filtered_trains:
+                        answer = 'Найдено: \n'
+                        for train in filtered_trains[0:30]:
+                            answer += \
+                                '<b>{date}</b>\n' \
+                                '<i>{num} {title}</i>\n' \
+                                '{seats}\n\n'.format(
+                                    date=train.departure_time,
+                                    num=train.number,
+                                    title=train.title,
+                                    seats="\n".join(
+                                        " - %s" % s
+                                        for s in train.seats.values()
+                                    ),
+                                )
+                        if len(filtered_trains) > 30:
+                            answer += \
+                                'Есть ещё поезда, сократите диапазон дат... '
+                        tasks_by_chats[task.chat.id].remove(task)
+                        await task.chat.send_text(answer, parse_mode='HTML')
+                    else:
+                        await queue.put(task)
+                        now = datetime.datetime.now()
+                        if task.deadline and now > task.deadline > 86400:
+                            await task.chat.send_text(
+                                'Ничего не нашёл. Прекращаю работу.')
+                        elif (now - task.last_notify).seconds > 3600:
+                            task.last_notify = now
+                            time_start = task.query.time_range.start.\
+                                strftime("%Y-%m-%d %H:%M")
+                            time_end = task.query.time_range.end.\
+                                strftime("%Y-%m-%d %H:%M")
+                            await task.chat.send_text(
+                                'Всё ещё нет билетов {city_from} – {city_to} '
+                                '{time_start} - {time_end}. '
+                                'Ищу уже {working} секунд.\n'
+                                'Продолжаю поиск...'.format(
+                                    city_from=task.city_from,
+                                    city_to=task.city_to,
+                                    time_start=time_start,
+                                    time_end=time_end,
+                                    working=(
+                                        now - task.start_time
+                                    ).seconds,
                                 ),
                             )
-                    if len(filtered_trains) > 30:
-                        answer += 'Есть ещё поезда, сократите диапазон дат... '
-
-                    await task.chat.send_text(answer, parse_mode='HTML')
-                else:
-                    await queue.put(task)
-                    if task.deadline and now > task.deadline > 86400:
-                        await task.chat.send_text(
-                            'Ничего не нашёл. Прекращаю работу.')
-                        break
-                    elif task.last_notify and \
-                            (now - task.last_notify).seconds > 3600:
-                        task.last_notify = now
-                        await task.chat.send_text(
-                            'Всё ещё нет билетов {city_from} – {city_to} '
-                            '{time_start} - {time_end}. '
-                            'Ищу уже {working} секунд.\n'
-                            'Продолжаю поиск...'.format(
-                                city_from=task.city_from,
-                                city_to=task.city_to,
-                                time_start=task.query.time_range.start,
-                                time_end=task.query.time_range.end,
-                                working=(now - task.start_time).seconds,
-                            ),
-                        )
-            await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                raise
+            # except:  # noqa
+            #     pass
+            try:
+                logger.debug('Sleep for 30 seconds')
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                return
 
 
 @multibot('notify')
@@ -349,6 +406,7 @@ async def notify(chat: Chat, match):
             city_from=city_from,
             city_to=city_to,
         )
+        tasks_by_chats[chat.id].add(task)
         await queue.put(task)
 
 
@@ -394,6 +452,40 @@ async def search(chat: Chat, match):
     await chat.send_text(answer, parse_mode='HTML')
 
 
+@bot.command('/status')
+async def status(chat: Chat, match):
+    tasks = tasks_by_chats[chat.id]
+    if tasks:
+        answer = 'Текущие задачи: \n' + '\n'.join(
+            f'- {t} /stop{t.id}' for t in tasks,
+        )
+    else:
+        answer = 'Текущих задач нет'
+    await chat.send_text(answer, parse_mode='HTML')
+
+
+@bot.command(r'/stop(\d+)')
+async def stop(chat: Chat, match):
+    async with NotifyExceptions(chat) as notifier:
+        tasks = list(filter(
+            lambda x: x.id == int(match.group(1)),
+            tasks_by_chats[chat.id]
+        ))
+        # queue is not filtered, check for presence in dict instead
+        tasks_by_chats[chat.id] = {
+            x for x in tasks_by_chats[chat.id]
+            if x.id != int(match.group(1))
+        }
+    if notifier.exception:
+        return
+
+    if tasks:
+        answer = f"Задача отменена.\n{tasks[0]} больше не будет выполняться"
+    else:
+        answer = 'Нет такой задачи'
+    await chat.send_text(answer, parse_mode='HTML')
+
+
 @bot.default
 def default(chat: Chat, match):
     logger.warning('Not matched request: {}'.format(match))
@@ -417,27 +509,42 @@ async def stop_bot():
         task = await queue.get()
         task.chat.send_text('Bot is quitting. Bye!')
 
+
+def patch_bot_api_call(bot: Bot):
+    original_api_call = bot.api_call
+
+    async def api_call_with_handle_exceptions(method, **params):
+        try:
+            return await original_api_call(method, **params)
+        except ClientConnectionError:
+            await asyncio.sleep(RETRY_TIMEOUT)
+            return await original_api_call(method, **params)
+    bot.api_call = api_call_with_handle_exceptions
+
+
 if __name__ == '__main__':
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     logger.warning('Start RZD telegram bot...')
 
+    # do not get down on aiohttp exceptions
+    patch_bot_api_call(bot)
+
     loop = asyncio.get_event_loop()
-    while True:
-        bot_future = asyncio.ensure_future(bot.loop())
-        task_future = asyncio.ensure_future(process_queue())
-        try:
-            loop.run_until_complete(bot_future)
-            # bot.run()
-        except KeyboardInterrupt:
-            loop.run_until_complete(stop_bot())
-            bot_future.cancel()
-            task_future.cancel()
-            bot.stop()
-            raise
-        except:  # noqa
-            pass
-        finally:
-            loop.run_until_complete(bot.session.close())
-            logger.debug("Closing loop")
-            loop.stop()
-            loop.close()
+    bot_future = asyncio.ensure_future(bot.loop())
+    task_future = asyncio.ensure_future(process_queue())
+    try:
+        loop.run_until_complete(bot_future)
+        # bot.run()
+    except KeyboardInterrupt:
+        bot_future.cancel()
+        task_future.cancel()
+        loop.run_until_complete(stop_bot())
+        bot.stop()
+        # raise
+    # except:  # noqa
+    #     pass
+    finally:
+        loop.run_until_complete(bot.session.close())
+        logger.debug("Closing loop")
+    loop.stop()
+    loop.close()
