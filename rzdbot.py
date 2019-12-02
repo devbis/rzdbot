@@ -329,31 +329,33 @@ async def process_queue():
                         tasks_by_chats[task.chat.id].remove(task)
                         await task.chat.send_text(answer, parse_mode='HTML')
                     else:
-                        await queue.put(task)
                         now = datetime.datetime.now()
-                        if task.deadline and now > task.deadline > 86400:
+                        if task.deadline and now > task.deadline:
                             await task.chat.send_text(
                                 'Ничего не нашёл. Прекращаю работу.')
-                        elif (now - task.last_notify).seconds > 3600:
-                            task.last_notify = now
-                            time_start = task.query.time_range.start.\
-                                strftime("%Y-%m-%d %H:%M")
-                            time_end = task.query.time_range.end.\
-                                strftime("%Y-%m-%d %H:%M")
-                            await task.chat.send_text(
-                                'Всё ещё нет билетов {city_from} – {city_to} '
-                                '{time_start} - {time_end}. '
-                                'Ищу уже {working} секунд.\n'
-                                'Продолжаю поиск...'.format(
-                                    city_from=task.city_from,
-                                    city_to=task.city_to,
-                                    time_start=time_start,
-                                    time_end=time_end,
-                                    working=(
-                                        now - task.start_time
-                                    ).seconds,
-                                ),
-                            )
+                        else:
+                            await queue.put(task)
+                            if (now - task.last_notify).seconds > 3600:
+                                task.last_notify = now
+                                time_start = task.query.time_range.start.\
+                                    strftime("%Y-%m-%d %H:%M")
+                                time_end = task.query.time_range.end.\
+                                    strftime("%Y-%m-%d %H:%M")
+                                await task.chat.send_text(
+                                    'Всё ещё нет билетов '
+                                    '{city_from} – {city_to} '
+                                    '{time_start} - {time_end}. '
+                                    'Ищу уже {working} секунд.\n'
+                                    'Продолжаю поиск...'.format(
+                                        city_from=task.city_from,
+                                        city_to=task.city_to,
+                                        time_start=time_start,
+                                        time_end=time_end,
+                                        working=(
+                                            now - task.start_time
+                                        ).seconds,
+                                    ),
+                                )
             except asyncio.CancelledError:
                 raise
             # except:  # noqa
