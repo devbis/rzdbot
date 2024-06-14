@@ -87,7 +87,24 @@ class NotifyExceptions:
             else:
                 self.exception = exc_val
                 await self.chat.send_text("Ошибка: %s" % str(exc_val))
-                logger.error('Exception: %s', repr(exc_val))
+                logger.exception('Exception: %s', repr(exc_val))
+
+
+class SeatFilter:
+    def __init__(self, only_bottom: bool = False, only_top: bool = False, no_side: bool = False,
+                 same_coupe: bool = False):
+        self.only_bottom = only_bottom
+        self.only_top = only_top
+        self.no_side = no_side
+        self.same_coupe = same_coupe
+
+    def __str__(self):
+        return ', '.join(filter(None, (
+            'Только нижние' if self.only_bottom else '',
+            'Только верхние' if self.only_top else '',
+            'Без боковых' if self.no_side else '',
+            'В одном купе' if self.same_coupe else '',
+        )))
 
 
 class QueryString:
@@ -118,12 +135,28 @@ class QueryString:
             except ValueError:
                 pass
 
+        seats_filter = {}
+        if re.search(r'\s+[Нн][Ии][ЗзЖж]', when):
+            seats_filter['only_bottom'] = True
+            when = re.sub(r'\s+[Нн][Ии][ЗзЖж].*?\b', '', when, re.I)
+        if re.search(r'\s+[Вв][Ee][Рр][Хх].*?\b', when):
+            seats_filter['only_top'] = True
+            when = re.sub(r'\s+[Вв][Ee][Рр][Хх].*?\b', '', when, re.I)
+        if re.search(r'\s+[Нн][Ee]\s*[Бб][Оо][Кк].*?\b', when):
+            seats_filter['no_side'] = True
+            when = re.sub(r'\s+[Нн][Ee]\s*[Бб][Оо][Кк].*?\b', '', when, re.I)
+
+        if re.search(r'\s+[Оо][Дд][Нн][Оо](\s*[Кк][Уу]).*?\b', when):
+            seats_filter['same_coupe'] = True
+            when = re.sub(r'\s+[Оо][Дд][Нн][Оо](\s*[Кк][Уу]).*?\b', '', when, re.I)
+
         self.time_range = self.parse_when(when.strip())
         self.min_tickets = min_tickets
         self.types_filter = None
+        self.seats_filter = SeatFilter(**seats_filter) if seats_filter else None
 
     def __str__(self):
-        return '{} –> {}, c {} по {}{}{}{}'.format(
+        return '{} –> {}, c {} по {}{}{}{}{}'.format(
             self.city_from,
             self.city_to,
             self.time_range.start,
@@ -134,6 +167,7 @@ class QueryString:
             if self.types_filter else '',
             ' не меньше {} мест в одном поезде'.format(self.min_tickets)
             if self.min_tickets else '',
+            str(self.seats_filter) if self.seats_filter else '',
         )
 
     @staticmethod
@@ -177,6 +211,31 @@ class QueryString:
             if (end - start).days > 7:
                 raise TooLongPeriod('Too long period, use at max 7 days')
             return TimeRange(start, end)
+
+        r = re.match(r'0?(\d+)\.0?(\d+)(?:\s*[-–]\s*(\d+)\.0?(\d+))?', s)
+        if r:
+            start = datetime.datetime(
+                today.year,
+                int(r.group(2)),
+                int(r.group(1)),
+                0,
+                0,
+            )
+            start = future_month(start, today)
+
+            end = start.replace(hour=23, minute=59)
+            if r.group(3) is not None:
+                end = end.replace(day=int(r.group(3)), month=int(r.group(4)))
+            if end < start:
+                if start.month == 12:
+                    end = end.replace(month=1, year=end.year + 1)
+                else:
+                    end = end.replace(month=end.month + 1)
+
+            if abs((end - start).days) > 7:
+                raise TooLongPeriod('Too long period, use at max 7 days')
+            return TimeRange(start, end)
+
         r = re.match(r'0?(\d+)(?:\s*[\-–.]\s*0?(\d+))?', s)
         if r:
             start = datetime.datetime(
@@ -290,6 +349,45 @@ async def get_trains(fetcher: RzdFetcher, query: QueryString):
             if s.quantity >= query.min_tickets
         ), filtered_trains)
 
+    if query.seats_filter:
+        result = []
+        for t in filtered_trains:
+            carriages = await fetcher.get_train_carriages(
+                t.content['code0'],
+                t.content['code1'],
+                t.departure_time,
+                t.number,
+            )
+            cars = carriages['lst'][0]['cars']
+            valid_cars = []
+            for c in cars:
+                seat_groups = c['seats']
+                if query.seats_filter.only_bottom:
+                    seat_groups = [g for g in seat_groups if g['type'] in {'dn'}]
+                if query.seats_filter.only_top:
+                    seat_groups = [g for g in seat_groups if g['type'] in {'up'}]
+                seats = []
+                for g in seat_groups:
+                    seats.extend(int(s[:3], 10) for s in g['places'].split(','))
+                if query.seats_filter.only_bottom:
+                    # 'dn' responds all seats, not only down
+                    seats = [s for s in seats if s % 2]
+                if query.seats_filter.no_side:
+                    seats = [s for s in seats if s <= 36]
+
+                car_is_valid = True
+                if query.seats_filter.same_coupe:
+                    car_is_valid = False
+                    for x in range(9):
+                        if len({x*4 + 1, x*4 + 2, x*4 + 3, x*4 + 4} & set(seats)) >= 2:  # TODO: remove hardcode
+                            car_is_valid = True
+                if car_is_valid:
+                    valid_cars.append(c)
+
+            if valid_cars:
+                result.append(t)
+        filtered_trains = result
+
     return list(filtered_trains), trains
 
 
@@ -386,7 +484,7 @@ async def notify(chat: Chat, match):
         if notifier.exception:
             return
 
-        msg = """Буду искать по запросу {} -> {}, с {} по {}{}{}{}""".format(
+        msg = """Буду искать по запросу {} -> {}, с {} по {}{}{}{}{}""".format(
             city_from,
             city_to,
             query.time_range.start,
@@ -397,6 +495,7 @@ async def notify(chat: Chat, match):
             if query.types_filter else '',
             ' не меньше {} мест в одном поезде'.format(query.min_tickets)
             if query.min_tickets else '',
+            query.seats_filter or '',
         )
         await chat.send_text(msg)
         start_time = datetime.datetime.now()

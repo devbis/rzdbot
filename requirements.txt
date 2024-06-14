@@ -1,2 +1,2 @@
 aiotg==0.9.9
-git+https://github.com/devbis/aiorzd.git@0169c2ec7e1e8d947348917e21f3adaafa9f3ed5#egg=aiorzd
+git+https://github.com/devbis/aiorzd.git@561730c5fced348486f578a5e95f765498212aed#egg=aiorzd
