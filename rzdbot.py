@@ -459,7 +459,7 @@ async def status(chat: Chat, match):
     tasks = tasks_by_chats[chat.id]
     if tasks:
         answer = 'Текущие задачи: \n' + '\n'.join(
-            f'- {t} /stop{t.id}' for t in tasks,
+            f'- {t} /stop{t.id}' for t in tasks
         )
     else:
         answer = 'Текущих задач нет'
