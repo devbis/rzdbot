@@ -358,6 +358,9 @@ async def get_trains(fetcher: RzdFetcher, query: QueryString):
                 t.departure_time,
                 t.number,
             )
+            if not carriages.get('lst'):
+                logger.error('Cannot get carriages for train %s: %s', t.number, carriages)
+                continue
             cars = carriages['lst'][0]['cars']
             valid_cars = []
             for c in cars:
