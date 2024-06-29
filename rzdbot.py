@@ -615,14 +615,20 @@ async def stop_bot():
 
 
 def patch_bot_api_call(bot: Bot):
-    original_api_call = bot.api_call
+    original_api_call = bot._api_call
 
-    async def api_call_with_handle_exceptions(method, **params):
+    async def _api_call(method, **params):
+        nonlocal original_api_call
+
         try:
             return await original_api_call(method, **params)
         except ClientConnectionError:
             await asyncio.sleep(RETRY_TIMEOUT)
             return await original_api_call(method, **params)
+
+    def api_call_with_handle_exceptions(method, **params):
+        return asyncio.ensure_future(_api_call(method, **params))
+
     bot.api_call = api_call_with_handle_exceptions
 
 
