@@ -632,6 +632,26 @@ def patch_bot_api_call(bot: Bot):
     bot.api_call = api_call_with_handle_exceptions
 
 
+async def main():
+    bot_future = asyncio.ensure_future(bot.loop())
+    task_future = asyncio.ensure_future(process_queue())
+    try:
+        await asyncio.gather(bot_future, task_future)
+    except (Exception, asyncio.CancelledError):
+        try:
+            await stop_bot()
+        except (Exception, asyncio.CancelledError):
+            pass
+        bot.stop()
+
+        for t in [bot_future, task_future]:
+            try:
+                t.cancel()
+                await t
+            except asyncio.CancelledError:
+                pass
+
+
 if __name__ == '__main__':
     logger.setLevel(logging.DEBUG)
     logger.warning('Start RZD telegram bot...')
@@ -639,22 +659,4 @@ if __name__ == '__main__':
     # do not get down on aiohttp exceptions
     patch_bot_api_call(bot)
 
-    loop = asyncio.get_event_loop()
-    bot_future = asyncio.ensure_future(bot.loop())
-    task_future = asyncio.ensure_future(process_queue())
-    try:
-        loop.run_until_complete(bot_future)
-        # bot.run()
-    except KeyboardInterrupt:
-        bot_future.cancel()
-        task_future.cancel()
-        loop.run_until_complete(stop_bot())
-        bot.stop()
-        # raise
-    # except:  # noqa
-    #     pass
-    finally:
-        loop.run_until_complete(bot.session.close())
-        logger.debug("Closing loop")
-    loop.stop()
-    loop.close()
+    asyncio.run(main())
