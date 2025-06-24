@@ -90,6 +90,22 @@ class NotifyExceptions:
                 logger.exception('Exception: %s', repr(exc_val))
 
 
+async def with_retry(coro, *args, wait=3.0, max_iterations=None, **kwargs):
+    sleep = wait
+    i = 0
+    while True:
+        try:
+            return await coro(*args, **kwargs)
+        except (UpstreamError, ClientConnectionError) as e:
+            logger.warning('Retrying due to: %s', e)
+            i += 1
+            if max_iterations and  i >= max_iterations:
+                logger.error('Max retries exceeded, giving up')
+                raise e
+        await asyncio.sleep(sleep)
+        sleep += wait
+
+
 class SeatFilter:
     def __init__(self, only_bottom: bool = False, only_top: bool = False, no_side: bool = False,
                  same_coupe: bool = False):
@@ -317,17 +333,13 @@ class QueueItem:
 
 
 async def get_trains(fetcher: RzdFetcher, query: QueryString):
-    while True:
-        try:
-            trains = await fetcher.trains(
-                query.city_from,
-                query.city_to,
-                query.time_range,
-            )
-            break
-        except (UpstreamError, ClientConnectionError):
-            await asyncio.sleep(0.5)
-            continue
+    trains = await with_retry(
+        fetcher.trains,
+        query.city_from,
+        query.city_to,
+        query.time_range,
+        wait=5,
+    )
 
     # exact filtering by time range
     filtered_trains = [
@@ -352,11 +364,13 @@ async def get_trains(fetcher: RzdFetcher, query: QueryString):
     if query.seats_filter:
         result = []
         for t in filtered_trains:
-            carriages = await fetcher.get_train_carriages(
+            carriages = await with_retry(
+                fetcher.get_train_carriages,
                 t.content['code0'],
                 t.content['code1'],
                 t.departure_time,
                 t.number,
+                max_iterations=10,
             )
             if not carriages.get('lst'):
                 logger.error('Cannot get carriages for train %s: %s', t.number, carriages)
