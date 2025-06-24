@@ -103,7 +103,7 @@ async def with_retry(coro, *args, wait=3.0, max_iterations=None, **kwargs):
                 logger.error('Max retries exceeded, giving up')
                 raise e
         await asyncio.sleep(sleep)
-        sleep += wait
+        sleep += wait * i
 
 
 class SeatFilter:
@@ -370,7 +370,8 @@ async def get_trains(fetcher: RzdFetcher, query: QueryString):
                 t.content['code1'],
                 t.departure_time,
                 t.number,
-                max_iterations=10,
+                wait=10,
+                max_iterations=20,
             )
             if not carriages.get('lst'):
                 logger.error('Cannot get carriages for train %s: %s', t.number, carriages)
